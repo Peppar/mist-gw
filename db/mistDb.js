@@ -28,7 +28,8 @@ function stringify(obj)
         if (Array.isArray(obj))
         {
             return "["
-                + obj.reduce( function (prev, cur) { return (prev ? prev + "," : "") + stringify( cur ) } )
+                + obj.map( function (cur) { return stringify( cur ); } )
+                    .reduce( function( prev, cur ) { return prev + "," + cur } )
                 + "]"
         }
         else
@@ -37,11 +38,11 @@ function stringify(obj)
 
             keys.sort()
             return "{" +
-                keys.reduce( function (prev, cur) {
-                    return (prev ? prev + "," : "" )
-                        + JSON.stringify( cur )
+                keys.map( function (cur) {
+                    return JSON.stringify( cur )
                         + ":"
                         + stringify( obj[ cur ] ) } )
+                    .reduce( function( prev, cur ) { return prev + "," + cur } )
                 + "}";
         }
     }
