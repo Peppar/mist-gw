@@ -14,11 +14,44 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 var fs = require('fs');
 var util = require("util");
 var http2 = require("http2");
-//var sqlite3 = require("sqlite3");
+var sqlite3 = require("sqlite3").verbose();
+
+function PeerDb(file) {
+  this.db = new sqlite3.Database(file);
+  this.db.run("CREATE TABLE IF NOT EXISTS `peer` " +
+    "(`fingerprint` TEXT," +
+     "`type` TEXT," +
+     "`address` TEXT," +
+     "`port` INT)");
+}
+
+PeerDb.prototype.setPeers = function(fingerprint, peers) {
+  this.db.run("DELETE FROM `peer` WHERE `fingerprint`=?", fingerprint);
+  for (var i in peers) {
+    this.db.run("INSERT INTO `peer` " +
+      "(`fingerprint`, `type`, `address`, `port`) " +
+      "VALUES (?, ?, ?, ?)", fingerprint, peers[i].type,
+        peers[i].address, peers[i].port);
+  }
+}
+
+PeerDb.prototype.getPeers = function(fingerprint, callback) {
+  this.db.all("SELECT * FROM `peer` WHERE `fingerprint`=?", fingerprint,
+    function(err, rows) {
+      var peers = rows.map(function(row) {
+        return { type:    row.type,
+                 address: row.address,
+                 port:    row.port };
+      });
+      callback(peers);
+  });
+}
+
+var peerDb = new PeerDb('./db/peer.sqlite');
 
 var options = {
-  key: fs.readFileSync('/etc/letsencrypt/live/helkokbok.se/privkey.pem'),
-  cert: fs.readFileSync('/etc/letsencrypt/live/helkokbok.se/cert.pem'),
+  key: fs.readFileSync('./keys/privkey1.pem'),
+  cert: fs.readFileSync('./keys/cert1.pem'),
   requestCert: true,
   rejectUnauthorized: false
 };
@@ -32,7 +65,10 @@ server.on('request', function(request, response) {
         parts[0] === "" &&
         parts[1] === "peer") {
       var fingerprint = parts[2];
-      response.end('TEST: Getting peer with fingerprint ' + fingerprint);
+      peerDb.getPeers(fingerprint, function(peers) {
+        response.writeHead(200, {"Content-Type": "application/json"});
+        response.end(JSON.stringify(peers));
+      });
     } else {
       response.writeHead(404, 'Resource Not Found');
       response.end('Resource Not Found');
@@ -48,10 +84,12 @@ server.on('request', function(request, response) {
         fingerprint = cert.fingerprint;
       }
       if (fingerprint) {
-        console.log('going well...');
         request.on('data', function(data) {
-          response.end('TEST: Setting peer with fingerprint ' + fingerprint +
-                       'to ' + data);
+          peerDb.setPeers(fingerprint, JSON.parse(data));
+          response.writeHead(200, {"Content-Type": "application/json"});
+          response.end(JSON.stringify(true));
+          console.log('TEST: Setting peer with fingerprint ' + fingerprint +
+                      'to ' + data);
         });
         request.on('end', function() {
         });
