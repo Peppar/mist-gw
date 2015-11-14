@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+      "http2": "molnarg/node-http2",
+      "socks5-client": "Peppar/socks5-client",
+      "socks5-https-client": "Peppar/socks5-https-client",
+      "ths": "Mowje/node-ths"
+  }
+}
