@@ -8,6 +8,7 @@ var zip = require( 'node-zip' );
 var FS = require( 'q-io/fs' );
 var SHA3 = require( 'sha3' );
 var crypto = require( 'crypto' );
+var assert = require( 'assert' );
 
 var ROOT_OBJECT = "root";
 
@@ -52,6 +53,16 @@ function stringify(obj)
     }
 }
 
+function numberToUInt32Buf( num )
+{
+    var buf = new Buffer(4);
+
+    buf.writeUIntLE( num, 0, 4 );
+    return buf;
+}
+
+
+
 function Transaction()
 {
     this.objects = {};
@@ -73,12 +84,17 @@ Transaction.prototype =
             content: content,
             contentType: contentType,
             attributes: attributes };
+        assert( !this.objects[ id ] && !this.deletedObjects[ id ] && id != parent );
         this.objects[ id/*.toString( 'hex' )*/ ] = obj;
         return obj;
     },
 
     modifyObject: function( obj, parent, pathElem, content, contentType, attributes )
     {
+        if (this.objects[ obj.id ] || this.deletedObjects[ obj.id ])
+            throw "Object " + obj.id + " already exists in the transaction";
+        if (obj.id == parent)
+            throw "Object " + obj.id + " has itself as parent"
         this.objects[ obj.id.toString( 'hex' ) ]
             = { parent: parent ? (parent == ROOT_OBJECT ? NULL : parent.id.toString( 'hex' )) : obj.parentId,
                 pathElem: pathElem ? pathElem : obj.pathElem,
@@ -89,6 +105,8 @@ Transaction.prototype =
 
     deleteObject: function( obj )
     {
+        if (this.objects[ obj.id ] || this.deletedObjects[ obj.id ])
+            throw "Object " + obj.id + " already exists in the transaction";
         this.deletedObjects[ obj.id ] = 1;
     },
 
@@ -113,6 +131,8 @@ Transaction.prototype =
         var keys = Object.keys( this.objects );
         var that = this;
 
+        d.update( numberToUInt32Buf( keys.length ) );
+        keys.sort();
         keys.forEach( function(key) { 
             var obj = that.objects[ key ]
 
@@ -131,7 +151,13 @@ Transaction.prototype =
                 d.update( stringify( obj.attributes ) );
             }
         });
+        keys = Object.keys( this.deletedObjects );
+        d.update( numberToUInt32Buf( keys.length ) );
+        keys.sort();
+        keys.forEach( function(key) { d.update( key ) } );
         keys = Object.keys( this.content );
+        d.update( numberToUInt32Buf( keys.length ) );
+        keys.sort();
         keys.forEach( function(key) { d.update( key ) } );
         return d
     },
@@ -162,12 +188,15 @@ mistDb.prototype =
             .then( function (exists) { if (exists) throw new Error( "mistDb.create '" + that.fileName + "' already exists" ) } )
             .then( function() { return Qdb.createDatabase( that.fileName, Qdb.OPEN_CREATE|Qdb.OPEN_READWRITE ) } )
             .then( function (db) { that.db = db } )
-            .then( function () { that.db.run( "CREATE TABLE Object (id, version, status, parent, pathElem, content, contentType)" ) } )
-            .then( function () { that.db.run( "CREATE TABLE Attribute (id, version, name, value, json)" ) } )
-            .then( function () { that.db.run( "CREATE TABLE Content (hash, nr, content)" ) } )
-            .then( function () { that.db.run( "CREATE TABLE \"Transaction\" (version, timestamp, user, hash, signature)" ) } )
-            .then( function () { that.db.run( "CREATE TABLE TransactionParent (version, parentVersion)" ) } )
-            .then( function () { that.db.run( "CREATE TABLE Setting (name, value)" ) } );
+            .then( function() { return Q.all( [
+                that.db.run( "CREATE TABLE Object (globalId, localId, version, status, parent, pathElem, content, contentType)" ),
+                that.db.run( "CREATE TABLE Attribute (id, version, name, value, json)" ),
+                that.db.run( "CREATE TABLE Content (id, hash, nr, content)" ),
+                that.db.run( "CREATE TABLE \"Transaction\" (version, timestamp, user, hash, signature)" ),
+                that.db.run( "CREATE TABLE TransactionParent (version, parentVersion)" ),
+                that.db.run( "CREATE TABLE Setting (name, value)" ),
+                that.db.run( "CREATE TABLE Log (timestamp, log)" ),
+            ] ) } );
         // Create table log, find out which versions we received when
 
 
@@ -239,52 +268,258 @@ swap C, D?
 
     runTransaction: function( transaction )
     {
-        var version, parentTransactions;
+        var version, parentTransactions, nextLocalObjectId, nextBlobId;
         var hasErr = false;
         var deferred = Q.defer();
-        var that = this
+        var that = this;
+        var objectLookupGlobalId = {};
+        var objectLookupLocalId = {};
+//        var parentLookup = {}
+//        var missingParent = {}
 
         this.getLock()
             .then( function() { return that.db.run( "BEGIN TRANSACTION" ) } )
             .then( function() {
                 // Find all versions that do not have a child transaction yet
-                // We handle merges by letting the next transaction have all these transactions as parent
+                // We handle merge the transaction graph by setting all these
+                // transaction as parents to the next transaction
                 return that.db.all( 'SELECT t.version AS version, t.hash AS hash FROM "Transaction" AS t LEFT OUTER JOIN TransactionParent AS tp ON t.version=tp.version WHERE tp.version IS NULL' )
             })
             .then( function(rows) {
                 parentTransactions = rows
             })
             .then( function() {
-                // Find the local number for our transaction
-                return that.db.all( 'SELECT MAX(version) AS max From "Transaction"' )
+                // Find the local number of our transaction
+                return that.db.all( 'SELECT IFNULL(MAX(version),0) AS max From "Transaction"' )
             })
             .then( function(rows) {
-                if (rows.length)
-                    version = rows[0].max + 1
-                else
-                    version = 1
-                // Create the new transaction
-                return that.db.run( 'INSERT INTO "Transaction" (version, timestamp) VALUES (?, DATETIME(\'now\'))',
-                    [version] )
+                version = rows[0].max + 1
+                // Either we are the first transaction, or there must be parent transactions
+                assert( version == 1 || parentTransactions.length > 0 )
             })
             .then( function() {
-                var res = parentTransactions.map( function(row) {
-                    return that.db.run( 'INSERT INTO TransactionParent (version, parentVersion) VALUES (?, ?)',
-                        [version, row.version] )
-                })
+                // Find the local number for the next object, in case we need to create some
+                return that.db.all( 'SELECT IFNULL(MAX(localId),0) AS max FROM Object' )
+            })
+            .then( function(rows) {
+                nextLocalObjectId = rows[0].max + 1
+            })
+            .then( function() {
+                // Find the local number for the next content blob, in case we need to create some
+                return that.db.all( 'SELECT IFNULL(MAX(id),0) AS max FROM Content' )
+            })
+            .then( function(rows) {
+                nextBlobId = rows[0].max + 1
+            })
+            .then( function() {
+                // Create the new transaction and create links to its parent transaction(s)
+                var res =
+                    [ that.db.run( 'INSERT INTO "Transaction" (version, timestamp) VALUES (?, DATETIME(\'now\'))',
+                        [version] ) ]
+                    .concat( parentTransactions.map( function(row) {
+                        return that.db.run( 'INSERT INTO TransactionParent (version, parentVersion) VALUES (?, ?)',
+                            [version, row.version] )} ) );
                 return Q.all( res );
             })
             .then( function() {
-                var res = []
+                if (transaction.objects)
+                    return ;
+
+                // Fetch all objects from the transaction, as well as their parents. We need this to
+                // convert between local ids and global ids, and to see if we have to perform loop checks
+                // for parents that have changed.
+                var query = 'SELECT globalId, localId, parent, status '
+                    + 'FROM Object AS o '
+                    + 'WHERE o.status <= ' + STATUS_DELETED + ' AND o.globalId IN ( '
+                    + Object.keys( transaction.objects )
+                        .map( function(key) { 
+                            var obj = transaction.objects[key];
+
+                            if (obj.parent)
+                                return "'" + obj.id + "','" + obj.parent + "'";
+                            else
+                                return "'" + obj.id + "'";
+                        } )
+                        .concat( function () {
+                            Object.keys( transaction.deletedObjects )
+                                .map( function (key) { return "'" + key + "'" } );
+                        })
+                        .reduce( function(prev, cur) { return prev + "," + cur } )
+                    + ")";
+
+                return that.db.run( query )
+            } )
+            .then( function (rows) {
+                var recursiveLookupParent = {};
+
+                if (rows) {
+                    rows.forEach( function(row) {
+                        objectLookupLocalId[ row.localId ] = row;
+                        objectLookupGlobalId[ row.globalId ] = row;
+                    })
+                }
+                // Check so we do not have any loops and that all parent ids exist
+                for (let i in transaction.objects)
+                {
+                    let obj = transaction.objects[i];
+                    let ol = objectLookupGlobalId[ obj.id ];
+                    let olParent = ol && ol.parent && objectLookupLocalId[ ol.parent ];
+
+                    // This is a new object
+                    if (!ol)
+                    {
+                        // The new object is a top level object, or it has a parent object that
+                        // we know about
+                        if (!obj.parent || transaction.objects[ obj.parent ])
+                            continue;
+                        // We do not have a parent object
+                        throw "A new object has an invalid parent " + obj.parent;
+                    }
+                    else
+                    {
+                        // The object is a top level object, has the same parent as the last version
+                        // of the object, or has a parent object that is a top level object
+                        if (!obj.parent || olParent && obj.parent == olParent.globalId || ol.parent == null)
+                            continue;
+
+                        let o = ol
+
+                        while (objectLookupLocalId[ o.parent ])
+                            o = objectLookupLocalId[ o.parent ];
+                        // We found a top level object whice recursing
+                        if (o.parent == null)
+                            continue;
+                        // We need to fetch more objects from the database to be able to recurse
+                        // to a top level object
+                        obj.needRecursiveParentLookup;
+                        recursiveLookupParent[ o.parent ] = 1;
+                    }
+                }
+                // Do we need to lookup any more parents
+                if (Object.keys( recursiveLookupParent ).length == 0)
+                    return
+                function buildQuery( keys )
+                {
+                    return 'SELECT globalId, localId, parent, status '
+                        + 'FROM Object AS o '
+                        + 'WHERE o.status <= ' + STATUS_DELETED + ' AND o.localId IN ( '
+                        + keys.map( function(key) { return "'" + key + "'"; } )
+                            .reduce( function(prev, cur) { return prev + "," + cur } )
+                        + ")";
+                }
+                function doRecursiveLookup(rows)
+                {
+                    rows.forEach( function(row) {
+                        objectLookupLocalId[ row.localId ] = row;
+                        objectLookupGlobalId[ row.globalId ] = row;
+                    });
+                    recursiveLookupParent = {}
+                    rows.forEach( function(row) {
+                        var o = row;
+
+                        while (o.parent != null && objectLookupLocalId[ o.parent ])
+                            o = objectLookupLocalId[ o.parent ];
+                        if (o.parent == null)
+                            return;
+                        recursiveLookupParent[ o.parent ] = 1;
+                    } )
+                    // Do not need to lookup any more parents
+                    if (Object.keys( recursiveLookupParent ).length == 0)
+                        return;
+                    return that.db.all( buildQuery( Object.keys( recursiveLookupParent ) ) ).then( doRecursiveLookup )
+                }
+                return that.db.all( buildQuery( Object.keys( recursiveLookupParent ) ) ).then( doRecursiveLookup )
+            }).then( function() {
+                // Method is a bit complex since it needs to work with both local and global ids
+                function findLoop( id, pathObjs )
+                {
+                    if (!id)
+                        return false;
+                    if (!pathObjs)
+                        pathObjs = {};
+                    if (pathObjs[ id ])
+                        return true;
+                    pathObjs[ id ] = 1;
+                    if (transaction.objects[ id ])
+                        return findLoop( transaction.objects[ id ].parent, pathObjs );
+                    else if (objectLookupGlobalId[ id ] && objectLookupLocalId[ objectLookupGlobalId[ id ].parent ])
+                        return findLoop( objectLookupLocalId[ objectLookupGlobalId[ id ].parent ].globalId, pathObjs );
+                    // Should be impossible to reach here
+                    assert( false );
+                }
 
                 for (let i in transaction.objects)
                 {
-                    var obj = transaction.objects[i];
+                    let obj = transaction.objects;
 
-                    res.push( that.db.run( 'UPDATE Object SET status=status+2 WHERE id=? AND status <= 2',
-                        [obj.id] ) );
-                    res.push( that.db.run( 'INSERT INTO Object (id, version, status, parent, pathElem, content, contentType) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                        [ obj.id, version, STATUS_CURRENT, obj.parent, obj.pathElem, obj.concat, obj.contentType ] ) );
+                    if (!obj.needRecursiveParentLookup)
+                        continue;
+
+                    if (findLoop( obj.id ))
+                        throw "Found a loop in transaction for object " + obj.id;
+                }
+            }).then( function() {
+                var deletedChildLookup = {};
+
+                if (Object.keys( transaction.deletedObjects ).length == 0)
+                    return;
+                // Check so we are deleting objects that exist, and that does not have any children that
+                // are not also deleted
+                for (let i in obj.deletedObjects)
+                {
+                    if (!objectLookupGlobalId[ i ] || objectLookupGlobalId[ i ].status == STATUS_DELETED)
+                        throw "Trying to delete object " + obj.id + " that does not exist, or is already deleted";
+                    if (objectLookupGlobalId[ i ].parent)
+                    {
+                        // Store the number of children that are deleted in this transaction
+                        if (!deletedChildLookup[ objectLookupGlobalId[ i ].parent ])
+                            deletedChildLookup[ objectLookupGlobalId[ i ].parent ] = 0;
+                        deletedChildLookup[ objectLookupGlobalId[ i ].parent ]++;
+                    }
+                }
+                // Find out how many children each deleted object has in the database
+                return that.db.all( "SELECT parent, count(*) AS count FROM Object WHERE status=" + STATUS_CURRENT + " AND parent IN ("
+                    + Object.keys( obj.deletedObjects )
+                        .map( function(key) { return "'" + objectLookupGlobalId[ key ].localId + "'" })
+                        .reduce( function (prev, cur) { return prev + "," + cur })
+                    + ") GROUP BY parent" )
+                    .then( function(rows) {
+                        rows.forEach( function(row) {
+                            // Check whether all remaining children are deleted by in this transaction
+                            if (deletedChildLookup[ row.parent ])
+                            {
+                                if (row.count <= deletedChildLookup[ row.parent ])
+                                    return;
+                            }
+                            else if (row.count == 0)
+                                return;
+                            throw "Trying to delete object " + row.parent + " that has child objects"
+                        })
+                    })
+             }).then( function() {
+                var res = [];
+                for (let i in transaction.objects)
+                {
+                    let obj = transaction.objects[i];
+
+                    if (objectLookupGlobalId[ obj.id ])
+                    {
+                        obj.localId = objectLookupGlobalId[ obj.id ].localId;
+                        res.push( that.db.run( 'UPDATE Object SET status=status+2 WHERE localId=? AND status <= 2',
+                            [ obj.localId ] ) );
+                    }
+                    else
+                        obj.localId = nextLocalObjectId++;
+                    objectLookupLocalId[ obj.localId ] = obj;
+                    objectLookupGlobalId[ obj.id ] = obj;
+                    obj.globalId = obj.id;
+                }
+                for (let i in transaction.objects)
+                {
+                    let obj = transaction.objects[i];
+
+                    res.push( that.db.run( 'INSERT INTO Object (globalId, localId, version, status, parent, pathElem, content, contentType) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                        [ obj.id, obj.localId, version, STATUS_CURRENT, obj.parent ? objectLookupGlobalId[ obj.parent ].localId : null, obj.pathElem, obj.content, obj.contentType ] ) );
                     for (let j in obj.attributes)
                     {
                         var a = obj.attributes[j];
@@ -296,8 +531,17 @@ swap C, D?
                             json = true;
                         }
                         res.push( that.db.run( 'INSERT INTO Attribute (id, version, name, value, json) VALUES (?, ?, ?, ?, ?)',
-                            [obj.id, version, j, a, json ] ) );
+                            [obj.localId, version, j, a, json ] ) );
                     }
+                }
+                for (let i in transaction.deletedObjects)
+                {
+                    let ol = objectLookupGlobalId[ i ]
+
+                    res.push( that.db.run( 'UPDATE Object SET status=status+2 WHERE localId=? AND status <= 2',
+                        [ ol.localId ] ) );
+                    res.push( that.db.run( "INSERT INTO Object (globalId, localId, version, status, parent ) VALUES (?, ?, ?, ?, ?)",
+                        [ i, ol.localId, version, STATUS_DELETED, ol.parent ] ) )
                 }
                 return Q.all( res );
             } )
@@ -356,6 +600,12 @@ swap C, D?
     {
 
     },
+
+    versionedAccess: function()
+    {
+        // select * from Tutorial where (id, version) in (select id, max(version) from Tutorial where id>10 and id<20 and version <= 4000 group by id)
+        // and
+    }
 }
 
 exports.Transaction = Transaction;
