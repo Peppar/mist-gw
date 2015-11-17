@@ -1,5 +1,6 @@
 "use strict";
 
+var Q = require( 'q' );
 var http2tor = require('./http2tor');
 
 function MistDirectory(host, port) {
@@ -9,7 +10,7 @@ function MistDirectory(host, port) {
 
 MistDirectory.prototype =
 {
-    setPeers: function(peers, callback)
+    setPeers: function( peers )
     {
         var post_data = new Buffer(JSON.stringify(peers), 'utf8');
         var post_options = {
@@ -23,25 +24,14 @@ MistDirectory.prototype =
             port: this.port,
             keepAlive: false
         };
-    
-        var request = http2tor.request( post_options, function(res) {
-            var body = '';
-            res.setEncoding('utf8');
-            res.on('data', function(chunk) {
-                body += chunk;
+        
+        return http2tor.request( post_options, post_data )
+            .then( function( body ) {
+                return Q.fcall( function () { return JSON.parse( body ); } );
             });
-            res.on('end', function() {
-                if (callback) {
-                    callback( JSON.parse(body) );
-                }
-            });
-        });
-    
-        request.write(post_data);
-        request.end();
     },
 
-    getPeers: function(fingerprint, callback)
+    getPeers: function( fingerprint )
     {
         var get_options = {
             method: 'GET',
@@ -49,19 +39,11 @@ MistDirectory.prototype =
             host: this.host,
             port: this.port
         };
-    
-        var request = http2tor.request( get_options, function(res) {
-            var body = '';
-            res.setEncoding('utf8');
-            res.on('data', function(chunk) {
-                body += chunk;
+        
+        return http2tor.request( get_options )
+            .then( function( body ) {
+                return Q.fcall( function () { return JSON.parse( body ); } );
             });
-            res.on('end', function() {
-                if (callback) {
-                    callback( JSON.parse(body) );
-                }
-            });
-        });
     }
 };
 

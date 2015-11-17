@@ -1,8 +1,11 @@
 "use strict";
 
+var Q = require( 'q' );
+var util = require('util');
 var fs = require('fs');
 var connect = require('./index.js');
 var http2tor = require('./http2tor.js');
+var x509 = require('x509');
 
 var connectOptions = {
     key: fs.readFileSync('../userA.key'),
@@ -14,27 +17,22 @@ var connectOptions = {
     torCtrlMessageFn: function(controlMessage) { console.log( 'Ctrl: ' + controlMessage ) }
 };
 
-connect.createConnect( connectOptions, function(c) {
-    console.log( 'Connectlib server up and running at ' + c.onionAddress );
-    c.addDirectory( '4smogsofurtibfuq.onion', 443 );
-    c.publishPeers();
-    console.log( 'Published onion address to 4smogsofurtibfuq.onion' );
-    
-    var hostname = '4smogsofurtibfuq.onion';
-    console.log( 'Trying to connect to : ' + hostname );
-    
-    var requestOptions = {
-        host: hostname,
-        port: 443,
-        path: '/peer/F6:84:3C:B4:E3:FE:A2:01:1A:6D:8D:00:4E:80:B8:EA:7E:ED:CF:65',
-        keepAlive: false
-    };
-    var request = http2tor.request( requestOptions );
-    request.setTimeout(20000);
-    request.on('response', function(res) {
-        console.log('Got response');
-        res.setEncoding('utf8');
-        res.pipe(process.stdout);
-    });
-    request.end();
-});
+function startChatService( username ) {
+    // TODO
+}
+
+var c;
+connect.createConnect( connectOptions )
+    .then( function( _c ) { c = _c; } )
+    .then( function() { console.log( 'Connectlib server up and running at ' + c.onionAddress ) } )
+    .then( function() { console.log( 'Connectlib server fingerprint is ' + c.fingerprint ) } )
+    .then( function() { c.addDirectory( '4smogsofurtibfuq.onion', 443 ) } )
+    .then( function() { c.addUser( 'peppar', connectOptions.cert ) } )
+    .then( function() { c.addService( 'chat', startChatService ) } )
+    .then( function() { return c.publishPeers() } )
+    .then( function() { console.log( 'Published onion address to 4smogsofurtibfuq.onion' ) } )
+    .then( function() { return c.userRequest( 'peppar', { path: '/services'} ) } )
+    .then( function( body ) { console.log( 'Got response!' + body.toString() ); } )
+    .then( function() { return c.userRequest( 'peppar', { path: '/hoj'} ) } )
+    .then( function( body ) { console.log( 'Got response!' + body.toString() ); } )
+    .done();
