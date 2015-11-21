@@ -66,6 +66,16 @@ function stringify(obj)
     }
 }
 
+function dateToString( date )
+{
+    return date.toISOString().split( '.' )[0];
+}
+
+function stringToDate( str )
+{
+    return new Date( str.replace( ' ', 'T' ) );
+}
+
 function numberToUInt32Buf( num )
 {
     var buf = new Buffer(4);
@@ -177,60 +187,84 @@ Transaction.prototype =
         var keys
         var that = this;
 
+//        console.log( "Start hash" )
+
         // Type
         d.update( numberToUInt32Buf( 1 ) );
+//        console.log( 1 )
 
         // Timestamp
-        d.update( this.timestamp.toISOString() );
+        d.update( dateToString( this.timestamp ) );
+//        console.log( dateToString( this.timestamp ) )
 
         // Transaction parent hash, in hash order
         keys = Object.keys( this.parents );
         d.update( numberToUInt32Buf( keys.length ) );
+//        console.log( keys.length )
         keys.sort();
-        keys.forEach( function (key) { d.update( key ); } );
+        keys.forEach( function (key) { //console.log( key );
+            d.update( key ); } );
 
         // User id if present
         if (this.user) {
             d.update( numberToUInt32Buf( 1 ) );
+//            console.log( 1 )
             d.update( this.user );
+//            console.log( this.user )
         } else {
             d.update( numberToUInt32Buf( 0 ) );
+//            console.log( 0 )
         }
 
         // Objects in id order
         keys = Object.keys( this.objects );
         d.update( numberToUInt32Buf( keys.length ) );
+//        console.log( keys.length )
         keys.sort();
         keys.forEach( function(key) { 
             var obj = that.objects[ key ]
 
             d.update( obj.id )
+//            console.log( obj.id )
             if (obj.parent)
+            {
                 d.update( obj.parent );
+//                console.log( obj.parent )
+            }
             if (obj.pathElem)
+            {
                 d.update( obj.pathElem );
+//                console.log( obj.pathElem )
+            }
             if (obj.content)
             {
                 d.update( obj.content );
+//                console.log( obj.content )
                 d.update( obj.contentType );
+//                console.log( obj.contentType )
             }
             if (Object.keys( obj.attributes ).length)
             {
                 d.update( stringify( obj.attributes ) );
+//                console.log( stringify( obj.attributes ) )
             }
         });
 
         // Deleted object ids in id order.
         keys = Object.keys( this.deletedObjects );
         d.update( numberToUInt32Buf( keys.length ) );
+//        console.log( keys.length )
         keys.sort();
-        keys.forEach( function(key) { d.update( key ) } );
+        keys.forEach( function(key) { //console.log( key )
+            d.update( key ) } );
 
         // Content hash in hash order.
         keys = Object.keys( this.content );
         d.update( numberToUInt32Buf( keys.length ) );
+//        console.log( keys.length )
         keys.sort();
-        keys.forEach( function(key) { d.update( key ) } );
+        keys.forEach( function(key) { //console.log( key )
+            d.update( key ) } );
 
         return d;
     },
@@ -326,7 +360,7 @@ swap C, D?
 
     },
 
-    getLock: function( callback )
+    getLock: function()
     {
         if (this.lock == null)
         {
@@ -347,7 +381,7 @@ swap C, D?
         if (this.lock.length == 0)
             this.lock = null;
         else
-            this.lock.shift.call( this );
+            this.lock.shift().call( this );
     },
 
     /*
@@ -388,9 +422,10 @@ swap C, D?
                 return that.db.all( 'SELECT IFNULL(MAX(version),0) AS max From "Transaction"' )
             })
             .then( function(rows) {
-                version = rows[0].max + 1
+                // Just use even numbers for "real" transactions. Use odd numbers for conflict
+                version = Math.floor( (rows[0].max + 2) / 2 ) * 2;
                 // Either we are the first transaction, or there must be parent transactions
-                assert( version == 1 || parentTransactions.length > 0 )
+                assert( version == 2 || parentTransactions.length > 0 );
             })
             .then( function() {
                 // Find the local number for the next object, in case we need to create some
@@ -668,7 +703,7 @@ swap C, D?
         var that = this;
 
         this.getLock()
-            .then( function() { return that.db.run(
+            .then( function() { return that.db.all(
                     "SELECT t.version AS version, t.timestamp AS timestamp, t.user AS user, t.hash AS hash, t.signature AS signature, "
                     +   "parentVersion, p.hash AS parentHash "
                     +   "FROM \"Transaction\" AS t "
@@ -680,17 +715,17 @@ swap C, D?
 
                 rows.forEach( function(row) {
                     if (!res[ row.version ])
-                        res[ row.version ] = { version: row.version, timestamp: row.timestamp, user: row.user, hash: row.hash, signature: row.signature, parents: {} };
+                        res[ row.version ] = { version: row.version, timestamp: stringToDate( row.timestamp ), user: row.user, hash: row.hash, signature: row.signature, parents: {} };
                     if (row.parentVersion && row.parentHash)
                         res[ row.version ].parents[ row.parentVersion ] = row.parentHash;
                 });
                 return res;
             })
             .catch( function(err) { deferred.reject( err ) } )
-            .done( function() { 
+            .done( function(res) { 
                 that.releaseLock();
                 if (!hasErr)
-                    deferred.resolve();
+                    deferred.resolve(res);
                 } );
         return deferred.promise;
     },
@@ -700,55 +735,107 @@ swap C, D?
         var hasErr = false;
         var deferred = Q.defer();
         var that = this;
+        var transaction;
 
         this.getLock()
             .then( function() {
                 if (typeof transactionHashOrVersion == 'object')
                     transactionHashOrVersion = transactionHashOrVersion.version;
                 if (typeof transactionHashOrVersion == 'number')
-                    return that.db.run(
+                    return that.db.all(
                         "SELECT t.version AS version, t.timestamp AS timestamp, t.user AS user, t.hash AS hash, t.signature AS signature, "
-                        +   "parentVersion, p.hash AS parentHash "
+                        +   "p.hash AS parentHash "
                         +   "FROM \"Transaction\" AS t "
                         +   "LEFT OUTER JOIN \"TransactionParent\" AS tp ON t.version=tp.version "
                         +   "LEFT OUTER JOIN \"Transaction\" AS p ON parentVersion=p.version "
                         +   "WHERE t.version=?",
                         [transactionHashOrVersion] );
-                return that.db.run(
+                return that.db.all(
                     "SELECT t.version AS version, t.timestamp AS timestamp, t.user AS user, t.hash AS hash, t.signature AS signature, "
-                    +   "parentVersion, p.hash AS parentHash "
+                    +   "p.hash AS parentHash "
                     +   "FROM \"Transaction\" AS t "
                     +   "LEFT OUTER JOIN \"TransactionParent\" AS tp ON t.version=tp.version "
                     +   "LEFT OUTER JOIN \"Transaction\" AS p ON parentVersion=p.version "
                     +   "WHERE t.hash=?",
                     [transactionHashOrVersion] );
-            } )
+            })
             .then( function(rows) {
                 var res = {};
 
                 rows.forEach( function(row) {
                     if (!res[ row.version ])
-                        res[ row.version ] = { version: row.version, timestamp: row.timestamp, user: row.user, hash: row.hash, signature: row.signature, parents: {} };
-                    if (row.parentVersion && row.parentHash)
-                        res[ row.version ].parents[ row.parentVersion ] = row.parentHash;
+                        res[ row.version ] = { version: row.version, timestamp: stringToDate( row.timestamp ), user: row.user, hash: row.hash, signature: row.signature, parents: {} };
+                    if (row.parentHash)
+                        res[ row.version ].parents[ row.parentHash ] = 1;
                 });
                 return res;
-            } )
-            .then( function(transaction) {
-                var keys = Object.keys( transaction );
+            })
+            .then( function(transactions) {
+                var keys = Object.keys( transactions );
+                var objectRows;
+                var parentRows;
+                var attributeRows;
+                var contentRows;
 
                 if (keys.length != 1)
-                    ;
-                "SELECT * FROM Object WHERE version=? "
-                "SELECT * FROM Attribute WHERE version=? "
-                // Select first version of content
-                "SELECT * FROM Content "
+                    throw error( ErrNo.NOT_FOUND, "Transaction not found" );
+                transaction = transactions[ keys[0] ];
+                return that.db.all( "SELECT localId, globalId, parent, status, pathElem, o.content AS content, contentType, hash FROM Object AS o "
+                        + "LEFT OUTER JOIN Content AS c ON o.content=id "
+                        + "WHERE version=? ",
+                        [ transaction.version ] )
+                    .then( function (rows) {
+                        objectRows = rows;
+                        return that.db.all( "SELECT DISTINCT p.localId AS localId, p.globalId AS globalId FROM Object as o, Object as p "
+                            + "WHERE o.version=? AND o.status IN (" + Status.CURRENT + "," + Status.OLD + ") AND o.parent=p.localId",
+                            [ transaction.version ] );
+                    }).then( function (rows) {
+                        parentRows = rows;
+                        return that.db.all( "SELECT id, name, value, json FROM Attribute "
+                            + "WHERE version=? ",
+                            [ transaction.version ] );
+                    }).then( function (rows) {
+                        attributeRows = rows;
+
+                        var parents = {};
+                        var objectByLocalId = {};
+                        var objects = {};
+                        var deletedObjects = {};
+
+                        parentRows.forEach( function(row) {
+                            parents[ row.localId ] = row.globalId;
+                        });
+
+                        objectRows.forEach( function(row) {
+                            if (row.status == Status.DELETED || row.status == Status.OLD_DELETED)
+                                deletedObjects[ row.globalId ] = 1;
+                            var obj = {
+                                id: row.globalId,
+                                parent: parents[ row.parent ] ? parents[ row.parent ] : null,
+                                pathElem: row.pathElem,
+                                content: row.hash,
+                                contentType: row.contentType,
+                                attributes: {},
+                            };
+                            objectByLocalId[ row.localId ] = obj;
+                            objects[ obj.id ] = obj;
+                        });
+                        attributeRows.forEach( function(row) {
+                            var value = row.value;
+
+                            if (row.json)
+                                value = JSON.parse( value );
+                            objectByLocalId[ row.id ].attributes[ row.name ] = value;
+                        });
+                        return new Transaction( transaction.hash, transaction.timestamp, transaction.user, transaction.signature,
+                                                transaction.parents, objects, {}, deletedObjects );
+                    })
             })
             .catch( function(err) { deferred.reject( err ) } )
-            .done( function() { 
+            .done( function(transaction) { 
                 that.releaseLock();
                 if (!hasErr)
-                    deferred.resolve();
+                    deferred.resolve(transaction);
                 } );
         return deferred.promise;
 
