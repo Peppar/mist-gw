@@ -71,6 +71,9 @@ describe( 'MistDb', function() {
                 done();
             })
             .catch( done );
+        }),
+        it( 'backup', function(done) {
+            db.backup( 'backup.zip' ).then( done ).catch( done );
         })
     })
 })

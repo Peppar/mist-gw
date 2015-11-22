@@ -203,6 +203,7 @@ Transaction.prototype =
             objects: {},
             deletedObjects: this.deletedObjects,
             content: this.content,
+            version: 1,
         };
 
         for (var i in this.objects)
@@ -261,8 +262,15 @@ DB.prototype =
         // Higher level
     },
 
-    verifyTransaction: function( transaction, callback )
+    /**
+     * Verify that a JSON transaction object has the correct hash value,
+     * and is internally consistent
+     */
+    verifyTransaction: function( transaction )
     {
+//        if (transaction.hash && tra)
+
+
         var inOrder = true;
 
         transaction
@@ -776,7 +784,6 @@ swap C, D?
                     deferred.resolve(transaction);
                 } );
         return deferred.promise;
-
     },
 
     writeTransaction: function( transaction, stream )
@@ -789,28 +796,48 @@ swap C, D?
         var output = fs.createWriteStream( backupFile );
         var archive = archiver('zip');
         var that = this;
+        var deferred = Q.defer();
+        var transactions;
+        var transactionKeys;
+        var transactionIndex = 0;
 
-        archive.on('error', function(err) {} );
-        archive.pipe( output );
-
-        this.listTransactions.then( function(transactions) {
-            var transactionKeys = Object.keys( transactions );
-            var transactionIndex = 0;
-
-            transactionKeys.sort();
-            function writeTransaction()
+        function writeTransaction()
+        {
+            if (transactionIndex >= transactionKeys.length)
             {
-                if (transactionIndex >= transactionKeys.length)
-                    return;
-                var trans = transactions[ transactionKeys[ transactionIndex ] ];
-
-                return that.getTransaction( trans ).then( function(transaction) {
-                    transactionIndex+1
-                }).then( writeTransaction );
+                archive.finalize();
+                deferred.resolve();
+                return;
             }
+            var trans = transactions[ transactionKeys[ transactionIndex ] ];
+
+            that.getTransaction( trans )
+                .then( function(transaction) {
+                    var fileName = "transaction_" + transactionIndex+1 + ".json";
+
+                    transactionIndex++;
+                    archive.append( stringify( transaction.toJSON() ), { name: fileName } );
+                })
+                .catch( function(err) { deferred.error( err ); } )
+                .done();
+        }
+
+        this.listTransactions().then( function(_transactions) {
+            transactions = _transactions;
+            transactionKeys = Object.keys( transactions );
+            transactionKeys.sort();
 
             return 0;
-        }).then( function () {} );
+        }).then( writeTransaction )
+        .catch( function(err) { deferred.error( err ); } )
+        .done();
+
+        archive.pipe( output );
+        archive.on('error', function(err) { deferred.error( err ) } );
+        archive.on('close', function() { deferred.resolve() } );
+        archive.on('entry', function(event) { writeTransaction() } );
+
+        return deferred.promise;
     },
 
     restore: function( backupFile )
