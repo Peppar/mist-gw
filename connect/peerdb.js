@@ -12,7 +12,7 @@ MistDirectory.prototype =
 {
     setPeers: function( peers )
     {
-        var post_data = new Buffer(JSON.stringify(peers), 'utf8');
+        var post_data = new Buffer( JSON.stringify(peers), 'utf8' );
         var post_options = {
             method: 'POST',
             headers: {
@@ -25,10 +25,7 @@ MistDirectory.prototype =
             keepAlive: false
         };
         
-        return http2tor.request( post_options, post_data )
-            .then( function( body ) {
-                return Q.fcall( function () { return JSON.parse( body ); } );
-            });
+        return http2tor.request( post_options, post_data );
     },
 
     getPeers: function( fingerprint )
@@ -41,9 +38,7 @@ MistDirectory.prototype =
         };
         
         return http2tor.request( get_options )
-            .then( function( body ) {
-                return Q.fcall( function () { return JSON.parse( body ); } );
-            });
+            .then( function( body ) { return Q( JSON.parse( body ) ); } );
     }
 };
 

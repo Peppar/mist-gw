@@ -5,6 +5,7 @@ var util = require('util');
 var http2 = require('http2');
 var https = require('https');
 var SocksAgent = require('socks5-https-client/lib/Agent');
+var cerr = require('./error');
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
@@ -40,6 +41,7 @@ function createSocksAgent( key, cert, socksHost, socksPort ) {
 
 function SocksHttp2Agent( options ) {
     http2.Agent.call( this, options );
+    this.validated_certs = {};
 }
 
 util.inherits( SocksHttp2Agent, http2.Agent );
@@ -57,13 +59,13 @@ SocksHttp2Agent.prototype.secureRequest = function( options, body )
         if (!(key in this.endpoints)) {
             this.once(key, function(endpoint) {
                 if (!endpoint) {
-                    deferred.reject( new Error( 'An HTTP2 connnection was not established.' ) );
+                    deferred.reject( cerr.create( 'An HTTP2 connnection was not established.', cerr.E_CONNECT_BAD ) );
                 } else {
                     var cert = endpoint.socket.getPeerCertificate();
                     if (options.targetCert &&
                         (!cert || !cert.fingerprint ||
                          cert.fingerprint !== options.targetCert.fingerPrint)) {
-                        deferred.reject( new Error( 'Fingerprint mismatch' ) );
+                        deferred.reject( cerr.create( 'Fingerprint mismatch', cerr.E_CONNECT_BAD ) );
                         endpoint.close();
                     } else if (options.getEndPoint) {
                         deferred.resolve( endpoint );
@@ -87,7 +89,7 @@ SocksHttp2Agent.prototype.secureRequest = function( options, body )
             });
         });
         request.on( 'error', function( err ) {
-            deferred.reject( err );
+            deferred.reject( cerr.create( 'Connection failed', cerr.E_CONNECT_FAIL ) );
         });
         if (body !== undefined) {
             request.write( body );
